@@ -3,7 +3,7 @@ use clap::Parser;
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use slab::Slab;
 use std::fs::File;
 use std::io::Write;
@@ -146,7 +146,7 @@ fn main() -> Result<()> {
     if !o.skip_layout {
         create_and_layout_file(&o, &mut rng, &popix, &junk)?;
     }
-    measure(&o, popix)?;
+    measure(&o, popix, &mut rng, &junk)?;
 
     Ok(())
 }
@@ -239,7 +239,12 @@ fn create_and_layout_file(
     Ok(())
 }
 
-fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
+fn measure(
+    o: &'static Opts, 
+    pos: Vec<u64>, 
+    rng: &mut impl RngCore,
+    junk: &JunkBuf,
+) -> Result<()> {
     let file = {
         let mut oo = OpenOptions::new();
         #[cfg(target_os = "linux")]
@@ -254,7 +259,6 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
     .open(&o.filename)?;
 
     let backend = backend(&file, o);
-    let mut index = 0;
     let loop_start = Instant::now();
     let mut ramping_up = true;
     let mut m = Metrics::new();
@@ -270,12 +274,10 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
         }
 
         while !backend.is_full() {
-            let offset = pos[index];
-            index = (index + 1) % pos.len();
-
-            let (buf_index, ptr, len) = buf_pool.checkout();
-            let mut op = Op::read(ptr, len, offset);
-            op.user_data = buf_index as u64;
+            let offset = rng.gen_range(0..o.n_blocks) * o.bs;
+            
+            let buf = junk.rand(rng);
+            let mut op = Op::write(buf.as_ptr(), buf.len(), offset);
             backend.submit(op)
         }
 
@@ -284,9 +286,6 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
                 if op.result < 0 {
                     bail!("write failed: {}", op.result);
                 }
-
-                let buf_index = op.user_data as usize;
-                buf_pool.release(buf_index);
 
                 if !ramping_up {
                     m.on_op_complete(op);
